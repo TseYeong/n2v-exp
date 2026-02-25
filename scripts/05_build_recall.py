@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""根据 embedding 构建 item topK 召回对。"""
+"""根据 embedding 构建 item topK 召回对，并写入 Hive。"""
 
 import argparse
 from pyspark.ml.feature import Normalizer
@@ -9,8 +9,8 @@ from pyspark.sql import types as T
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build topK recall candidates from embeddings")
-    parser.add_argument("--input", required=True, help="04 脚本输出路径")
-    parser.add_argument("--output", required=True, help="召回结果输出路径")
+    parser.add_argument("--input-table", required=True, help="04 脚本输出表（Hive）")
+    parser.add_argument("--output-table", required=True, help="召回结果输出表（Hive）")
     parser.add_argument("--topk", type=int, default=100)
     parser.add_argument("--min-sim", type=float, default=0.2)
     return parser.parse_args()
@@ -19,9 +19,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    spark = SparkSession.builder.appName("node2vec_build_recall").getOrCreate()
+    spark = SparkSession.builder.appName("node2vec_build_recall").enableHiveSupport().getOrCreate()
 
-    emb_df = spark.read.parquet(args.input).select(
+    emb_df = spark.table(args.input_table).select(
         F.col("word").alias("itemid"),
         F.col("vector").cast(T.ArrayType(T.DoubleType())).alias("vector"),
     )
@@ -54,7 +54,7 @@ def main() -> None:
         .drop("rk")
     )
 
-    recall_df.write.mode("overwrite").parquet(args.output)
+    recall_df.write.mode("overwrite").saveAsTable(args.output_table)
     spark.stop()
 
 
