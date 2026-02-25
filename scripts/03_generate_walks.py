@@ -2,14 +2,8 @@
 """根据第一步产出的 Hive 边表生成随机游走序列，并写入 Hive。"""
 
 import argparse
-import random
-from collections import defaultdict
-from typing import Dict, List, Tuple
-
 from pyspark.sql import SparkSession, functions as F
-
-
-NeighborMap = Dict[str, List[Tuple[str, float]]]
+from pyspark.sql import types as T
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,26 +16,33 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def weighted_pick(neighbors: List[Tuple[str, float]]) -> str:
-    total = sum(w for _, w in neighbors)
+@F.udf(returnType=T.StringType())
+def weighted_pick(neighbors):
+    """从邻居列表中按权重采样下一个节点。"""
+    if not neighbors:
+        return None
+
+    import random
+
+    total = 0.0
+    for n in neighbors:
+        w = float(n["weight"]) if n["weight"] is not None else 0.0
+        if w > 0:
+            total += w
+
     if total <= 0:
-        return random.choice(neighbors)[0]
+        return random.choice(neighbors)["dst"]
+
     r = random.random() * total
     s = 0.0
-    for node, w in neighbors:
+    for n in neighbors:
+        w = float(n["weight"]) if n["weight"] is not None else 0.0
+        if w <= 0:
+            continue
         s += w
         if s >= r:
-            return node
-    return neighbors[-1][0]
-
-
-def build_neighbor_map(edge_rows) -> NeighborMap:
-    graph: NeighborMap = defaultdict(list)
-    for src, dst, weight in edge_rows:
-        w = float(weight)
-        graph[src].append((dst, w))
-        graph[dst].append((src, w))
-    return graph
+            return n["dst"]
+    return neighbors[-1]["dst"]
 
 
 def main() -> None:
@@ -49,6 +50,7 @@ def main() -> None:
 
     spark = SparkSession.builder.appName("node2vec_generate_walks").enableHiveSupport().getOrCreate()
 
+    # 标准化边，并补成双向边。
     edges = (
         spark.table(args.input_table)
         .select(
@@ -59,33 +61,56 @@ def main() -> None:
         .where(F.col("src").isNotNull() & F.col("dst").isNotNull() & F.col("weight").isNotNull())
     )
 
-    edge_rows = edges.rdd.map(lambda r: (r[0], r[1], r[2])).collect()
-    graph = build_neighbor_map(edge_rows)
+    directed_edges = edges.unionByName(
+        edges.select(F.col("dst").alias("src"), F.col("src").alias("dst"), F.col("weight"))
+    )
 
-    nodes = list(graph.keys())
-    sc = spark.sparkContext
-    graph_bc = sc.broadcast(graph)
+    neighbors_df = (
+        directed_edges.groupBy("src")
+        .agg(F.collect_list(F.struct(F.col("dst"), F.col("weight"))).alias("neighbors"))
+        .cache()
+    )
 
-    tasks = [(n, i) for n in nodes for i in range(args.num_walks)]
+    nodes_df = neighbors_df.select(F.col("src").alias("start_node")).distinct()
 
-    def walk_partition(records):
-        random.seed(args.seed)
-        g = graph_bc.value
-        for start, _ in records:
-            walk = [start]
-            cur = start
-            for _ in range(args.walk_length - 1):
-                nbrs = g.get(cur, [])
-                if not nbrs:
-                    break
-                nxt = weighted_pick(nbrs)
-                walk.append(nxt)
-                cur = nxt
-            yield (walk,)
+    # 为每个节点生成 num_walks 条 walk。
+    walks_df = (
+        nodes_df.withColumn("walk_idx", F.explode(F.sequence(F.lit(1), F.lit(args.num_walks))))
+        .withColumn("walk_id", F.concat_ws("#", F.col("start_node"), F.col("walk_idx")))
+        .withColumn("current", F.col("start_node"))
+        .withColumn("words", F.array(F.col("start_node")))
+        .withColumn("ended", F.lit(False))
+        .select("walk_id", "current", "words", "ended")
+    )
 
-    walks_rdd = sc.parallelize(tasks, numSlices=max(1, len(nodes) // 2000 + 1)).mapPartitions(walk_partition)
-    walks_df = spark.createDataFrame(walks_rdd, ["words"])
-    walks_df.write.mode("overwrite").saveAsTable(args.output_table)
+    for step in range(args.walk_length - 1):
+        step_df = (
+            walks_df.join(neighbors_df, walks_df.current == neighbors_df.src, "left")
+            .withColumn(
+                "neighbors",
+                F.when(F.col("ended"), F.array().cast("array<struct<dst:string,weight:double>>")).otherwise(
+                    F.col("neighbors")
+                ),
+            )
+            .withColumn("neighbors", F.when(F.col("neighbors").isNull(), F.array().cast("array<struct<dst:string,weight:double>>")).otherwise(F.col("neighbors")))
+            .withColumn("neighbors", F.expr("shuffle(neighbors)"))
+            .withColumn(
+                "next_node",
+                F.when(F.size("neighbors") > 0, weighted_pick("neighbors")),
+            )
+            .withColumn("ended", F.col("ended") | F.col("next_node").isNull())
+            .withColumn("current", F.coalesce(F.col("next_node"), F.col("current")))
+            .withColumn(
+                "words",
+                F.when(F.col("next_node").isNotNull(), F.concat(F.col("words"), F.array(F.col("next_node")))).otherwise(
+                    F.col("words")
+                ),
+            )
+            .select("walk_id", "current", "words", "ended")
+        )
+        walks_df = step_df
+
+    walks_df.select("words").write.mode("overwrite").saveAsTable(args.output_table)
 
     spark.stop()
 
