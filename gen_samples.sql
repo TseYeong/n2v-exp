@@ -169,8 +169,7 @@ WITH
       AND t1.rank = t2.rank
       AND t1.itemid <> t2.itemid
   )
-INSERT OVERWRITE directory
-  '/department/ai/user/xieyun/online_data/ogv_recall/ogv_node2vec_v1/edge/${SCHEDULE_TIME, yyyyMMdd, -1d}' ROW FORMAT DELIMITED FIELDS TERMINATED BY ' '
+INSERT OVERWRITE ai.ogv_node2vec_edge_d PARTITION (log_date = '${SCHEDULE_TIME, yyyyMMdd, -1d}')
 SELECT
   id1,
   id2,
