@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""根据 Hive 边表生成随机游走序列，并写入 Hive。"""
+"""根据第一步产出的 Hive 边表生成随机游走序列，并写入 Hive。"""
 
 import argparse
 import random
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, functions as F
 
 
 NeighborMap = Dict[str, List[Tuple[str, float]]]
@@ -14,7 +14,7 @@ NeighborMap = Dict[str, List[Tuple[str, float]]]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate weighted random walks")
-    parser.add_argument("--input-table", required=True, help="02 脚本输出边表（Hive）")
+    parser.add_argument("--input-table", required=True, help="01 脚本输出边表（Hive，字段: id1,id2,weight）")
     parser.add_argument("--output-table", required=True, help="随机游走输出表（Hive）")
     parser.add_argument("--num-walks", type=int, default=10, help="每个点的游走次数")
     parser.add_argument("--walk-length", type=int, default=20, help="单次游走最大长度")
@@ -49,7 +49,16 @@ def main() -> None:
 
     spark = SparkSession.builder.appName("node2vec_generate_walks").enableHiveSupport().getOrCreate()
 
-    edges = spark.table(args.input_table).select("src", "dst", "weight")
+    edges = (
+        spark.table(args.input_table)
+        .select(
+            F.col("id1").cast("string").alias("src"),
+            F.col("id2").cast("string").alias("dst"),
+            F.col("weight").cast("double").alias("weight"),
+        )
+        .where(F.col("src").isNotNull() & F.col("dst").isNotNull() & F.col("weight").isNotNull())
+    )
+
     edge_rows = edges.rdd.map(lambda r: (r[0], r[1], r[2])).collect()
     graph = build_neighbor_map(edge_rows)
 
