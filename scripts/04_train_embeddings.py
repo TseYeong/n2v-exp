@@ -10,6 +10,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train item embeddings with Spark Word2Vec")
     parser.add_argument("--input-table", required=True, help="03 脚本输出表（Hive）")
     parser.add_argument("--output-table", required=True, help="embedding 输出表（Hive）")
+    parser.add_argument("--partitions", required=True, help="Hive 分区表达式，如 dt='20250101'")
     parser.add_argument("--vector-size", type=int, default=64)
     parser.add_argument("--window-size", type=int, default=5)
     parser.add_argument("--min-count", type=int, default=1)
@@ -32,7 +33,13 @@ def main() -> None:
         outputCol="embedding",
     ).fit(walk_df)
 
-    model.getVectors().write.mode("overwrite").saveAsTable(args.output_table)
+    result_df = model.getVectors().select("word", "vector")
+    result_df.createOrReplaceTempView("result_view")
+    insert_sql = "INSERT OVERWRITE TABLE {} PARTITION ({}) select word, vector from result_view".format(
+        args.output_table, args.partitions
+    )
+    spark.sql(insert_sql)
+
     spark.stop()
 
 

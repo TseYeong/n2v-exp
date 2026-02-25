@@ -13,6 +13,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build topK recall candidates from embeddings")
     parser.add_argument("--input-table", required=True, help="04 脚本输出表（Hive）")
     parser.add_argument("--output-table", required=True, help="召回结果输出表（Hive）")
+    parser.add_argument("--partitions", required=True, help="Hive 分区表达式，如 dt='20250101'")
     parser.add_argument("--topk", type=int, default=100)
     parser.add_argument("--min-sim", type=float, default=0.2)
     parser.add_argument("--num-hash-tables", type=int, default=4, help="LSH 哈希表数")
@@ -40,7 +41,6 @@ def main() -> None:
     normalizer = Normalizer(inputCol="features", outputCol="norm_features", p=2.0)
     norm_df = normalizer.transform(vec_df).select("itemid", F.col("norm_features"))
 
-    # 使用 LSH 先召回候选，避免全量笛卡尔积。
     lsh = BucketedRandomProjectionLSH(
         inputCol="norm_features",
         outputCol="hashes",
@@ -61,7 +61,6 @@ def main() -> None:
         F.col("dist"),
     )
 
-    # 去掉 self pair，并转为近似 cosine 分数。
     pair_df = (
         pair_df.where(F.col("src_item") != F.col("dst_item"))
         .withColumn("score", F.lit(1.0) - (F.col("dist") * F.col("dist")) / F.lit(2.0))
@@ -76,7 +75,12 @@ def main() -> None:
         .drop("rk")
     )
 
-    recall_df.write.mode("overwrite").saveAsTable(args.output_table)
+    recall_df.createOrReplaceTempView("result_view")
+    insert_sql = "INSERT OVERWRITE TABLE {} PARTITION ({}) select src_item, dst_item, score from result_view".format(
+        args.output_table, args.partitions
+    )
+    spark.sql(insert_sql)
+
     spark.stop()
 
 

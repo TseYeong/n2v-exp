@@ -26,17 +26,20 @@ spark-submit scripts/01_prepare_sequences.py \
 
 spark-submit scripts/03_generate_walks.py \
   --input-table ai.tmp_node2vec_edge_raw_20250101 \
-  --output-table ai.tmp_node2vec_walk_20250101 \
+  --output-table ai.tmp_node2vec_walk \
+  --partitions "dt='20250101'" \
   --num-walks 10 \
   --walk-length 20
 
 spark-submit scripts/04_train_embeddings.py \
-  --input-table ai.tmp_node2vec_walk_20250101 \
-  --output-table ai.tmp_node2vec_emb_20250101
+  --input-table ai.tmp_node2vec_walk \
+  --output-table ai.tmp_node2vec_emb \
+  --partitions "dt='20250101'"
 
 spark-submit scripts/05_build_recall.py \
-  --input-table ai.tmp_node2vec_emb_20250101 \
-  --output-table ai.tmp_node2vec_recall_20250101 \
+  --input-table ai.tmp_node2vec_emb \
+  --output-table ai.tmp_node2vec_recall \
+  --partitions "dt='20250101'" \
   --topk 100
 ```
 
